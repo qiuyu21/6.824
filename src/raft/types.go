@@ -10,17 +10,25 @@ import (
 type ServerState uint8
 
 type Raft struct {
-	mu        	sync.Mutex
-	peers     	[]*labrpc.ClientEnd // RPC end points of all peers
-	persister 	*Persister          // Object to hold this peer's persisted state
-	me        	int                 // this peer's index into peers[]
-	dead      	int32               // set by Kill()
-	state 		ServerState			// leader?follower?candidate?
-	term 		int 				// current term
-	vote 		int 				// the peer voted for in this term
-	leader		int					// leader id
-	lastHB		time.Time			// latest heartbeat
-	timeout 	time.Duration		// election timeout for this term
+	mu        		sync.Mutex
+	applyCh			chan ApplyMsg
+	peers     		[]*labrpc.ClientEnd // RPC end points of all peers
+	persister 		*Persister          // Object to hold this peer's persisted state
+	me        		int                 // this peer's index into peers[]
+	dead      		int32               // set by Kill()
+	state 			ServerState			// leader?follower?candidate?
+	term 			int 				// current term
+	vote 			int 				// the peer voted for in this term
+	leader			int					// leader id
+	lastHB			time.Time			// latest heartbeat
+	timeout 		time.Duration		// election timeout for this term
+
+	logs 			map[int]*LogEntry	
+	commitIndex 	int
+	lastLogIndex	int
+
+	nextIndex 		[]int				// index of the next log entry to send
+	matchIndex		[]int				// index of highest log entry known to be replicated on server
 }
 
 type ApplyMsg struct {
@@ -34,8 +42,18 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type LogEntry struct {
+	Index, Term int
+	Command interface{}
+}
+
+type SortedLog []LogEntry
+func (this SortedLog) Less(i, j int) bool { return this[i].Index < this[j].Index }
+func (this SortedLog) Len() int { return len(this) }
+func (this SortedLog) Swap(i, j int) { this[i], this[j] = this[j], this[i] }
+
 type RPCRequestVoteArgs struct {
-	Term, CandidateId int
+	Term, CandidateId, LastLogIndex, LastLogTerm int
 }
 
 type RPCRequestVoteReply struct {
@@ -44,11 +62,13 @@ type RPCRequestVoteReply struct {
 }
 
 type RPCAppendEntriesArgs struct {
-	Term, LeaderId int
+	Term, LeaderId, PrevLogIndex, PrevLogTerm, LeaderCommitIndex int
+	Entries []LogEntry
 }
 
 type RPCAppendEntriesReply struct {
 	Term int
+	Success bool
 }
 
 type RPCInstallSnapshotArgs struct {}

@@ -18,9 +18,9 @@ package raft
 //
 
 import (
-	"fmt"
 	"log"
 	"math/rand"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -97,11 +97,18 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-	// Your code here (2B).
-	return index, term, isLeader
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+    if rf.state != LEADER { return -1, -1, false }
+	rf.lastLogIndex++
+	l := &LogEntry{
+		Index: rf.lastLogIndex,
+		Term: rf.term,
+		Command: command,
+	}
+	rf.logs[rf.lastLogIndex] = l
+	rf.matchIndex[rf.me] = rf.lastLogIndex
+	return rf.lastLogIndex, rf.term, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -133,8 +140,7 @@ func (rf *Raft) ticker() {
 			f := func(peer int) {
 				var args RPCAppendEntriesArgs
 				var repl RPCAppendEntriesReply
-				args.LeaderId = rf.me
-				args.Term = rf.term
+				rf.setupargs(&args, peer)
 				if rf.peers[peer].Call("Raft.RPCAppendEntries", &args, &repl) {
 					rf.mu.Lock()
 					if rf.state == LEADER {
@@ -143,6 +149,27 @@ func (rf *Raft) ticker() {
 							rf.term = repl.Term
 							rf.leader = -1
 							rf.lastHB = time.Now()
+						} else if !repl.Success {
+							rf.nextIndex[peer]--	// TODO: implement the optimization in the paper
+						} else if len(args.Entries) > 0 {
+							i := args.Entries[len(args.Entries)-1].Index
+							rf.nextIndex[peer] = i + 1
+							rf.matchIndex[peer] = i
+							// Update commit index
+							sorted := make([]int, len(rf.matchIndex))
+							copy(sorted, rf.matchIndex)
+							sort.Ints(rf.matchIndex)
+							j := sorted[n-n/2-1]
+							if j > rf.commitIndex && rf.logs[j].Term == rf.me {
+								for k := rf.commitIndex + 1; k <= j; k++ {
+									rf.applyCh <- ApplyMsg{
+										CommandValid: true,
+										CommandIndex: k,
+										Command: rf.logs[k].Command,
+									}
+								}
+								rf.commitIndex = j 
+							}
 						}
 					}
 					rf.mu.Unlock()
@@ -191,12 +218,17 @@ func (rf *Raft) ticker() {
 				}
 			}
 			rf.mu.Lock()
-			if granted == m { 
-				rf.state = LEADER
-				fmt.Printf("%v becomes leader\n", rf.me)
-			} else { 
-				rf.state = FOLLOWER 
-			}
+			if granted == m {
+                rf.state = LEADER
+                rf.nextIndex = make([]int, n)
+                rf.matchIndex = make([]int, n)
+				for i := 0; i < n; i++ { 
+					rf.nextIndex[i]  = rf.lastLogIndex + 1
+					rf.matchIndex[i] = -1
+				}
+            } else { 
+                rf.state = FOLLOWER
+            }
 			rf.mu.Unlock()
 		} else {
 			log.Fatalln("2 - This should not happen!")
@@ -204,6 +236,28 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) setupargs(args *RPCAppendEntriesArgs, peer int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	args.LeaderId = rf.me
+	args.Term = rf.term
+	args.LeaderCommitIndex = rf.commitIndex
+	if rf.lastLogIndex >= rf.nextIndex[peer] {
+		for i := rf.nextIndex[peer]; i <= rf.lastLogIndex; i++ {
+			args.Entries = append(args.Entries, LogEntry{
+				Index: i,
+				Term: rf.logs[i].Term,
+				Command: rf.logs[i].Command,
+			})
+		}
+		if rf.nextIndex[peer] == 0 {
+			args.PrevLogIndex = -1
+		} else {
+			args.PrevLogIndex = rf.nextIndex[peer] - 1
+			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+		}
+	}
+}
 
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -217,14 +271,18 @@ func (rf *Raft) ticker() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+	rf.applyCh = applyCh
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 	rf.state = FOLLOWER
+	rf.term = 0
 	rf.vote = -1
 	rf.lastHB = time.Now()
 	rf.timeout = RandElectionTimeout()
-	rf.term = 0
+	rf.logs = make(map[int]*LogEntry)
+	rf.commitIndex = -1
+	rf.lastLogIndex = -1
 	time.Sleep(rf.timeout)
 	go rf.ticker()
 	return rf
@@ -234,7 +292,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) RPCRequestVote(args *RPCRequestVoteArgs, reply *RPCRequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.Term < rf.term || (args.Term == rf.term && rf.vote != -1) {
+	if args.Term < rf.term ||
+        (args.Term == rf.term && rf.vote != -1) ||
+        (len(rf.logs) > 0 && (args.LastLogTerm < rf.logs[rf.lastLogIndex].Term ||
+        (args.LastLogTerm == rf.logs[rf.lastLogIndex].Term && args.LastLogIndex < rf.lastLogIndex))) {
 		reply.Term = rf.term
 		reply.VoteGranted = false
 	} else {
@@ -251,12 +312,45 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
 	if args.Term < rf.term {
 		reply.Term = rf.term
 	} else {
-		fmt.Printf("Server %v receiving heartbeats from %v...\n", rf.me, args.LeaderId)
 		rf.term = args.Term
 		rf.state = FOLLOWER
 		rf.leader = args.LeaderId
 		rf.lastHB = time.Now()
 		reply.Term = args.Term
+		reply.Success = true
+		if len(args.Entries) > 0 {
+			if (args.PrevLogIndex > rf.lastLogIndex) || 
+				(args.PrevLogIndex != -1 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term) {
+				reply.Success = false
+			} else {
+				for i, l_log := range args.Entries {	// All the logs should be sorted by Index
+					if f_log, ok := rf.logs[l_log.Index]; ok {
+						if l_log.Term == f_log.Term { continue }
+						for j := l_log.Index; j <= rf.lastLogIndex; j++ { delete(rf.logs, j) }
+					}
+					for j := i; j < len(args.Entries); j++ {
+						rf.logs[args.Entries[i].Index] = &LogEntry{
+							Index: args.Entries[i].Index,
+							Term: args.Entries[i].Term,
+							Command: args.Entries[i].Command,
+						}
+					}
+					rf.lastLogIndex = args.Entries[len(args.Entries)-1].Index
+					break
+				}
+			}
+		}
+		if args.LeaderCommitIndex > rf.commitIndex {
+			i := min(args.LeaderCommitIndex, rf.lastLogIndex)
+			for j := rf.commitIndex + 1; j <= i; j++ {
+				rf.applyCh <- ApplyMsg{
+					CommandValid: true,
+					CommandIndex: j,
+					Command: rf.logs[j].Command,
+				}
+			}
+			rf.commitIndex = i
+		}
 	}
 }
 
