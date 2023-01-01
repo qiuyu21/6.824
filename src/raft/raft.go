@@ -158,9 +158,9 @@ func (rf *Raft) ticker() {
 							// Update commit index
 							sorted := make([]int, len(rf.matchIndex))
 							copy(sorted, rf.matchIndex)
-							sort.Ints(rf.matchIndex)
+							sort.Ints(sorted)
 							j := sorted[n-n/2-1]
-							if j > rf.commitIndex && rf.logs[j].Term == rf.me {
+							if j > rf.commitIndex && rf.logs[j].Term == rf.term {
 								for k := rf.commitIndex + 1; k <= j; k++ {
 									rf.applyCh <- ApplyMsg{
 										CommandValid: true,
@@ -168,7 +168,7 @@ func (rf *Raft) ticker() {
 										Command: rf.logs[k].Command,
 									}
 								}
-								rf.commitIndex = j 
+								rf.commitIndex = j
 							}
 						}
 					}
@@ -183,7 +183,6 @@ func (rf *Raft) ticker() {
 				time.Sleep(TICK_INTERVAL)
 				continue
 			}
-			// Start a new election
 			rf.term++
 			rf.vote = rf.me
 			rf.state = CANDIDATE
@@ -193,10 +192,14 @@ func (rf *Raft) ticker() {
 			c := make(chan RPCRequestVoteReply, n)
 			c <- RPCRequestVoteReply{VoteGranted: true}
 			f := func(peer int) {
+				rf.mu.Lock()
 				var args RPCRequestVoteArgs
 				var repl RPCRequestVoteReply
 				args.CandidateId = rf.me
 				args.Term = newterm
+				args.LastLogIndex = rf.lastLogIndex
+				if args.LastLogIndex > 0 { args.LastLogTerm = rf.logs[rf.lastLogIndex].Term }
+				rf.mu.Unlock()
 				rf.peers[peer].Call("Raft.RPCRequestVote", &args, &repl)
 				c <- repl
 			}
@@ -224,7 +227,7 @@ func (rf *Raft) ticker() {
                 rf.matchIndex = make([]int, n)
 				for i := 0; i < n; i++ { 
 					rf.nextIndex[i]  = rf.lastLogIndex + 1
-					rf.matchIndex[i] = -1
+					rf.matchIndex[i] = 0
 				}
             } else { 
                 rf.state = FOLLOWER
@@ -250,11 +253,14 @@ func (rf *Raft) setupargs(args *RPCAppendEntriesArgs, peer int) {
 				Command: rf.logs[i].Command,
 			})
 		}
-		if rf.nextIndex[peer] == 0 {
-			args.PrevLogIndex = -1
-		} else {
-			args.PrevLogIndex = rf.nextIndex[peer] - 1
+		args.PrevLogIndex = rf.nextIndex[peer] - 1
+		if rf.nextIndex[peer] > 1 {
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+		}
+	} else {
+		args.PrevLogIndex = rf.lastLogIndex
+		if args.PrevLogIndex > 0 {
+			args.PrevLogTerm = rf.logs[rf.lastLogIndex].Term
 		}
 	}
 }
@@ -281,8 +287,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastHB = time.Now()
 	rf.timeout = RandElectionTimeout()
 	rf.logs = make(map[int]*LogEntry)
-	rf.commitIndex = -1
-	rf.lastLogIndex = -1
+	rf.commitIndex = 0
+	rf.lastLogIndex = 0
 	time.Sleep(rf.timeout)
 	go rf.ticker()
 	return rf
@@ -318,28 +324,33 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
 		rf.lastHB = time.Now()
 		reply.Term = args.Term
 		reply.Success = true
-		if len(args.Entries) > 0 {
-			if (args.PrevLogIndex > rf.lastLogIndex) || 
-				(args.PrevLogIndex != -1 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term) {
+
+		if (args.PrevLogIndex > rf.lastLogIndex) ||
+			(args.PrevLogIndex != 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term) {
 				reply.Success = false
-			} else {
-				for i, l_log := range args.Entries {	// All the logs should be sorted by Index
-					if f_log, ok := rf.logs[l_log.Index]; ok {
-						if l_log.Term == f_log.Term { continue }
-						for j := l_log.Index; j <= rf.lastLogIndex; j++ { delete(rf.logs, j) }
+				return
+			}
+
+		if len(args.Entries) > 0 {
+			for i, l_log := range args.Entries {	// All the logs should be sorted by Index
+				if f_log, ok := rf.logs[l_log.Index]; ok {
+					if l_log.Term == f_log.Term { continue }
+					for j := l_log.Index; j <= rf.lastLogIndex; j++ {
+						delete(rf.logs, j)
 					}
-					for j := i; j < len(args.Entries); j++ {
-						rf.logs[args.Entries[i].Index] = &LogEntry{
-							Index: args.Entries[i].Index,
-							Term: args.Entries[i].Term,
-							Command: args.Entries[i].Command,
-						}
-					}
-					rf.lastLogIndex = args.Entries[len(args.Entries)-1].Index
-					break
 				}
+				for j := i; j < len(args.Entries); j++ {
+					rf.logs[args.Entries[j].Index] = &LogEntry{
+						Index: args.Entries[j].Index,
+						Term: args.Entries[j].Term,
+						Command: args.Entries[j].Command,
+					}
+				}
+				rf.lastLogIndex = args.Entries[len(args.Entries)-1].Index
+				break
 			}
 		}
+
 		if args.LeaderCommitIndex > rf.commitIndex {
 			i := min(args.LeaderCommitIndex, rf.lastLogIndex)
 			for j := rf.commitIndex + 1; j <= i; j++ {
