@@ -47,11 +47,6 @@ type LogEntry struct {
 	Command interface{}
 }
 
-type SortedLog []LogEntry
-func (this SortedLog) Less(i, j int) bool { return this[i].Index < this[j].Index }
-func (this SortedLog) Len() int { return len(this) }
-func (this SortedLog) Swap(i, j int) { this[i], this[j] = this[j], this[i] }
-
 type RPCRequestVoteArgs struct {
 	Term, CandidateId, LastLogIndex, LastLogTerm int
 }
