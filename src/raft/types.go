@@ -19,7 +19,6 @@ type Raft struct {
 	state 			ServerState			// leader?follower?candidate?
 	term 			int 				// current term
 	vote 			int 				// the peer voted for in this term
-	leader			int					// leader id
 	lastHB			time.Time			// latest heartbeat
 	timeout 		time.Duration		// election timeout for this term
 
@@ -64,6 +63,7 @@ type RPCAppendEntriesArgs struct {
 type RPCAppendEntriesReply struct {
 	Term int
 	Success bool
+	Index int
 }
 
 type RPCInstallSnapshotArgs struct {}
