@@ -101,12 +101,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
     defer rf.mu.Unlock()
     if rf.state != LEADER { return -1, -1, false }
 	rf.lastLogIndex++
-	l := &LogEntry{
+	rf.logs[rf.lastLogIndex] = &LogEntry{
 		Index: rf.lastLogIndex,
 		Term: rf.term,
 		Command: command,
 	}
-	rf.logs[rf.lastLogIndex] = l
 	rf.matchIndex[rf.me] = rf.lastLogIndex
 	return rf.lastLogIndex, rf.term, true
 }
@@ -122,7 +121,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
 }
 
 func (rf *Raft) killed() bool {
@@ -147,10 +145,9 @@ func (rf *Raft) ticker() {
 						if repl.Term > rf.term {
 							rf.state = FOLLOWER
 							rf.term = repl.Term
-							rf.leader = -1
 							rf.lastHB = time.Now()
 						} else if !repl.Success {
-							rf.nextIndex[peer]--	// TODO: implement the optimization in the paper
+							rf.nextIndex[peer] = repl.Index
 						} else if len(args.Entries) > 0 {
 							i := args.Entries[len(args.Entries)-1].Index
 							rf.nextIndex[peer] = i + 1
@@ -214,7 +211,6 @@ func (rf *Raft) ticker() {
 					rf.mu.Lock()
 					rf.state = FOLLOWER
 					rf.term = res.Term
-					rf.leader = -1
 					rf.lastHB = time.Now()
 					rf.mu.Unlock()
 					break
@@ -254,15 +250,10 @@ func (rf *Raft) setupargs(args *RPCAppendEntriesArgs, peer int) {
 			})
 		}
 		args.PrevLogIndex = rf.nextIndex[peer] - 1
-		if rf.nextIndex[peer] > 1 {
-			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
-		}
 	} else {
 		args.PrevLogIndex = rf.lastLogIndex
-		if args.PrevLogIndex > 0 {
-			args.PrevLogTerm = rf.logs[rf.lastLogIndex].Term
-		}
 	}
+	if args.PrevLogIndex > 0 { args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term }
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -298,18 +289,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) RPCRequestVote(args *RPCRequestVoteArgs, reply *RPCRequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.Term < rf.term ||
-        (args.Term == rf.term && rf.vote != -1) ||
-        (len(rf.logs) > 0 && (args.LastLogTerm < rf.logs[rf.lastLogIndex].Term ||
-        (args.LastLogTerm == rf.logs[rf.lastLogIndex].Term && args.LastLogIndex < rf.lastLogIndex))) {
+	if args.Term < rf.term || (args.Term == rf.term && rf.vote != -1) {
 		reply.Term = rf.term
 		reply.VoteGranted = false
 	} else {
-		rf.term = args.Term
-		rf.vote = args.CandidateId
-		reply.VoteGranted = true
+		if args.Term > rf.term {
+			rf.term = args.Term
+			rf.vote = -1
+		}
+		if (len(rf.logs) > 0 && (args.LastLogTerm < rf.logs[rf.lastLogIndex].Term ||
+			(args.LastLogTerm == rf.logs[rf.lastLogIndex].Term && args.LastLogIndex < rf.lastLogIndex))) {
+			reply.VoteGranted = false
+		} else {
+			rf.vote = args.CandidateId
+			reply.VoteGranted = true
+		}
 	}
 }
+
 
 // Invoked by leaders to replicate log entries and to provide heartbeats
 func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEntriesReply) {
@@ -320,16 +317,21 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
 	} else {
 		rf.term = args.Term
 		rf.state = FOLLOWER
-		rf.leader = args.LeaderId
 		rf.lastHB = time.Now()
 		reply.Term = args.Term
 		reply.Success = true
 
-		if (args.PrevLogIndex > rf.lastLogIndex) ||
-			(args.PrevLogIndex != 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term) {
-				reply.Success = false
-				return
-			}
+		if args.PrevLogIndex > rf.lastLogIndex {
+			reply.Index = rf.lastLogIndex
+			reply.Success = false
+			return
+		} else if args.PrevLogIndex != 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
+			t := rf.logs[args.PrevLogIndex].Term
+			reply.Index = args.PrevLogIndex
+			for reply.Index > 1 && rf.logs[reply.Index-1].Term == t { reply.Index-- }
+			reply.Success = false
+			return
+		}
 
 		if len(args.Entries) > 0 {
 			for i, l_log := range args.Entries {	// All the logs should be sorted by Index
