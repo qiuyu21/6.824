@@ -10,24 +10,28 @@ import (
 type ServerState uint8
 
 type Raft struct {
-	mu        		sync.Mutex
-	applyCh			chan ApplyMsg
-	peers     		[]*labrpc.ClientEnd // RPC end points of all peers
-	persister 		*Persister          // Object to hold this peer's persisted state
-	me        		int                 // this peer's index into peers[]
-	dead      		int32               // set by Kill()
-	state 			ServerState			// leader?follower?candidate?
-	term 			int 				// current term
-	vote 			int 				// the peer voted for in this term
-	lastHB			time.Time			// latest heartbeat
-	timeout 		time.Duration		// election timeout for this term
+	mu        			sync.Mutex
+	applyCh				chan ApplyMsg
+	peers     			[]*labrpc.ClientEnd // RPC end points of all peers
+	persister 			*Persister          // Object to hold this peer's persisted state
+	me        			int                 // this peer's index into peers[]
+	dead      			int32               // set by Kill()
+	state 				ServerState			// leader?follower?candidate?
+	term 				int 				// current term
+	vote 				int 				// the peer voted for in this term
+	lastHB				time.Time			// latest heartbeat
+	timeout 			time.Duration		// election timeout for this term
 
-	logs 			map[int]*LogEntry	
-	commitIndex 	int
-	lastLogIndex	int
+	logs 				map[int]*LogEntry	
+	commitIndex 		int
+	lastLogIndex		int
 
-	nextIndex 		[]int				// index of the next log entry to send
-	matchIndex		[]int				// index of highest log entry known to be replicated on server
+	nextIndex 			[]int				// index of the next log entry to send
+	matchIndex			[]int				// index of highest log entry known to be replicated on server
+
+	snapshot 			[]byte
+	snapshotLastIndex 	int
+	snapshotLastTerm 	int
 }
 
 type ApplyMsg struct {
@@ -61,11 +65,15 @@ type RPCAppendEntriesArgs struct {
 }
 
 type RPCAppendEntriesReply struct {
-	Term int
+	Term, Index int
 	Success bool
-	Index int
 }
 
-type RPCInstallSnapshotArgs struct {}
+type RPCInstallSnapshotArgs struct {
+	Term, LeaderId, LastIncludedIndex, LastIncludedTerm int
+	Data []byte
+}
 
-type RPCInstallSnapshotReply struct {}
+type RPCInstallSnapshotReply struct {
+	Term int
+}
