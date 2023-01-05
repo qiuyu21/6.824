@@ -11,8 +11,8 @@ const (
 const (
 	TICK_INTERVAL 		= 10 * time.Millisecond		// frequency followers check latest heartbeat
 	HEARTBEAT_INTERVAL 	= 100 * time.Millisecond	// frequency leader sends out heartbeats
-	ELECTION_LB_TIMEOUT	= 150 * time.Millisecond	// lower bound election timeout
-	ELECTION_UB_TIMEOUT	= 300 * time.Millisecond	// upper bound election timeout
+	ELECTION_LB_TIMEOUT	= 200 * time.Millisecond	// lower bound election timeout
+	ELECTION_UB_TIMEOUT	= 350 * time.Millisecond	// upper bound election timeout
 )
 
 func min(args ...int) int {

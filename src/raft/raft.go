@@ -18,12 +18,14 @@ package raft
 //
 
 import (
+	"bytes"
 	"log"
 	"math/rand"
 	"sort"
 	"sync/atomic"
 	"time"
 
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -33,40 +35,6 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.term, rf.state == LEADER
-}
-
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
-}
-
-// restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -106,19 +74,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term: rf.term,
 		Command: command,
 	}
+	rf.persist()
 	rf.matchIndex[rf.me] = rf.lastLogIndex
 	return rf.lastLogIndex, rf.term, true
 }
 
-// the tester doesn't halt goroutines created by Raft after each test,
-// but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
-//
-// the issue is that long-running goroutines use memory and may chew
-// up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
-// should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 }
@@ -138,14 +98,17 @@ func (rf *Raft) ticker() {
 			f := func(peer int) {
 				var args RPCAppendEntriesArgs
 				var repl RPCAppendEntriesReply
-				rf.setupargs(&args, peer)
+				if !rf.setupargs(&args, peer) { return }
 				if rf.peers[peer].Call("Raft.RPCAppendEntries", &args, &repl) {
 					rf.mu.Lock()
 					if rf.state == LEADER {
-						if repl.Term > rf.term {
+						if repl.Term > args.Term {
 							rf.state = FOLLOWER
-							rf.term = repl.Term
-							rf.lastHB = time.Now()
+							if repl.Term > rf.term {
+								rf.term = repl.Term
+								rf.vote = -1
+								rf.persist()
+							}
 						} else if !repl.Success {
 							rf.nextIndex[peer] = repl.Index
 						} else if len(args.Entries) > 0 {
@@ -183,7 +146,7 @@ func (rf *Raft) ticker() {
 			rf.term++
 			rf.vote = rf.me
 			rf.state = CANDIDATE
-			rf.timeout = RandElectionTimeout()
+			rf.persist()
 			newterm := rf.term
 			rf.mu.Unlock()
 			c := make(chan RPCRequestVoteReply, n)
@@ -210,34 +173,39 @@ func (rf *Raft) ticker() {
 				} else if res.Term > newterm {
 					rf.mu.Lock()
 					rf.state = FOLLOWER
-					rf.term = res.Term
-					rf.lastHB = time.Now()
+					if res.Term > rf.term {
+						rf.term = res.Term
+						rf.vote = -1
+						rf.persist()
+					}
 					rf.mu.Unlock()
 					break
 				}
 			}
 			rf.mu.Lock()
-			if granted == m {
-                rf.state = LEADER
-                rf.nextIndex = make([]int, n)
-                rf.matchIndex = make([]int, n)
+			if granted == m && rf.term == newterm {
+				rf.state = LEADER
+				rf.nextIndex = make([]int, n)
+				rf.matchIndex = make([]int, n)
 				for i := 0; i < n; i++ { 
 					rf.nextIndex[i]  = rf.lastLogIndex + 1
 					rf.matchIndex[i] = 0
 				}
-            } else { 
-                rf.state = FOLLOWER
-            }
+			} else {
+				rf.state = FOLLOWER
+			}
+			rf.timeout = RandElectionTimeout()
 			rf.mu.Unlock()
 		} else {
-			log.Fatalln("2 - This should not happen!")
+			log.Fatalln("This should not happen!")
 		}
 	}
 }
 
-func (rf *Raft) setupargs(args *RPCAppendEntriesArgs, peer int) {
+func (rf *Raft) setupargs(args *RPCAppendEntriesArgs, peer int) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.state != LEADER { return false }
 	args.LeaderId = rf.me
 	args.Term = rf.term
 	args.LeaderCommitIndex = rf.commitIndex
@@ -254,6 +222,7 @@ func (rf *Raft) setupargs(args *RPCAppendEntriesArgs, peer int) {
 		args.PrevLogIndex = rf.lastLogIndex
 	}
 	if args.PrevLogIndex > 0 { args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term }
+	return true
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -280,29 +249,56 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logs = make(map[int]*LogEntry)
 	rf.commitIndex = 0
 	rf.lastLogIndex = 0
+	rf.readPersist(rf.persister.ReadRaftState())
 	time.Sleep(rf.timeout)
 	go rf.ticker()
 	return rf
+}
+
+// Caller should hold the lock
+func (rf *Raft) persist() {
+	w := &bytes.Buffer{}
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.term)
+	e.Encode(rf.vote)
+	e.Encode(rf.logs)
+	rf.persister.SaveRaftState(w.Bytes())
+}
+
+// restore previously persisted state.
+func (rf *Raft) readPersist(data []byte) {
+	if data == nil || len(data) < 1 { return }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&rf.term) != nil || d.Decode(&rf.vote) != nil || d.Decode(&rf.logs) != nil {
+		log.Fatalln("readPersist has failed")
+	}
+	for index := range rf.logs { if index > rf.lastLogIndex { rf.lastLogIndex = index } }
 }
 
 // Invoked by candidates during elections
 func (rf *Raft) RPCRequestVote(args *RPCRequestVoteArgs, reply *RPCRequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.Term < rf.term || (args.Term == rf.term && rf.vote != -1) {
+	shouldPersist := false
+	defer func(){ if shouldPersist {rf.persist()} }()
+	if args.Term < rf.term || (args.Term == rf.term && rf.vote != args.CandidateId) {
 		reply.Term = rf.term
 		reply.VoteGranted = false
 	} else {
 		if args.Term > rf.term {
 			rf.term = args.Term
 			rf.vote = -1
+			rf.state = FOLLOWER
+			shouldPersist = true
 		}
-		if (len(rf.logs) > 0 && (args.LastLogTerm < rf.logs[rf.lastLogIndex].Term ||
+		if (rf.lastLogIndex > 0 && (args.LastLogTerm < rf.logs[rf.lastLogIndex].Term ||
 			(args.LastLogTerm == rf.logs[rf.lastLogIndex].Term && args.LastLogIndex < rf.lastLogIndex))) {
 			reply.VoteGranted = false
 		} else {
 			rf.vote = args.CandidateId
 			reply.VoteGranted = true
+			shouldPersist = true
 		}
 	}
 }
@@ -312,17 +308,22 @@ func (rf *Raft) RPCRequestVote(args *RPCRequestVoteArgs, reply *RPCRequestVoteRe
 func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	shouldPersist := false
+	defer func(){ if shouldPersist {rf.persist()} }()
 	if args.Term < rf.term {
 		reply.Term = rf.term
 	} else {
-		rf.term = args.Term
+		if args.Term > rf.term {
+			rf.term = args.Term
+			rf.vote = args.LeaderId
+			shouldPersist = true
+		}
 		rf.state = FOLLOWER
 		rf.lastHB = time.Now()
 		reply.Term = args.Term
 		reply.Success = true
-
 		if args.PrevLogIndex > rf.lastLogIndex {
-			reply.Index = rf.lastLogIndex
+			reply.Index = rf.lastLogIndex + 1
 			reply.Success = false
 			return
 		} else if args.PrevLogIndex != 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
@@ -332,14 +333,11 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
 			reply.Success = false
 			return
 		}
-
 		if len(args.Entries) > 0 {
-			for i, l_log := range args.Entries {	// All the logs should be sorted by Index
+			for i, l_log := range args.Entries {
 				if f_log, ok := rf.logs[l_log.Index]; ok {
 					if l_log.Term == f_log.Term { continue }
-					for j := l_log.Index; j <= rf.lastLogIndex; j++ {
-						delete(rf.logs, j)
-					}
+					for j := l_log.Index; j <= rf.lastLogIndex; j++ { delete(rf.logs, j) }
 				}
 				for j := i; j < len(args.Entries); j++ {
 					rf.logs[args.Entries[j].Index] = &LogEntry{
@@ -349,10 +347,10 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
 					}
 				}
 				rf.lastLogIndex = args.Entries[len(args.Entries)-1].Index
+				shouldPersist = true
 				break
 			}
 		}
-
 		if args.LeaderCommitIndex > rf.commitIndex {
 			i := min(args.LeaderCommitIndex, rf.lastLogIndex)
 			for j := rf.commitIndex + 1; j <= i; j++ {
