@@ -7,9 +7,9 @@ import (
 
 const (
 	TICK_INTERVAL 		= 10 * time.Millisecond		// frequency followers check latest heartbeat
-	HEARTBEAT_INTERVAL 	= 110 * time.Millisecond	// frequency leader sends out heartbeats
-	ELECTION_LB_TIMEOUT	= 330 * time.Millisecond	// lower bound election timeout
-	ELECTION_UB_TIMEOUT	= 500 * time.Millisecond	// upper bound election timeout
+	HEARTBEAT_INTERVAL 	= 100 * time.Millisecond	// frequency leader sends out heartbeats
+	ELECTION_LB_TIMEOUT	= 250 * time.Millisecond	// lower bound election timeout
+	ELECTION_UB_TIMEOUT	= 400 * time.Millisecond	// upper bound election timeout
 )
 
 func min(args ...int) int {

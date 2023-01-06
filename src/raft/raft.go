@@ -70,9 +70,7 @@ func (rf *Raft) ticker() {
 			f := func(peer int) {
 				var args RPCAppendEntriesArgs
 				var repl RPCAppendEntriesReply
-				if !rf.setupargs(&args, peer) {
-					return
-				}
+				if !rf.setupargs(&args, peer) { return }
 				if rf.peers[peer].Call("Raft.RPCAppendEntries", &args, &repl) {
 					rf.mu.Lock()
 					if rf.isLeader {
@@ -149,8 +147,8 @@ func (rf *Raft) ticker() {
 			}
 			for i := 0; i < n; i++ { if i != rf.me { go f(i) } }
 			granted := 0
-			m := n / 2 + 1
-			for i := 0; granted < m && granted + n - i >= m; i++ {
+			majority := n / 2 + 1
+			for i := 0; granted < majority && granted + n - i >= majority; i++ {
 				res := <- c
 				if res.VoteGranted {
 					granted++
@@ -166,7 +164,7 @@ func (rf *Raft) ticker() {
 				}
 			}
 			rf.mu.Lock()
-			if granted == m && rf.term == newterm {
+			if granted == majority && rf.term == newterm {
 				rf.isLeader = true
 				rf.nextIndex = make([]int, n)
 				rf.matchIndex = make([]int, n)
@@ -175,6 +173,7 @@ func (rf *Raft) ticker() {
 					rf.matchIndex[i] = 0
 				}
 			}
+			rf.lastHB = time.Now()
 			rf.timeout = RandElectionTimeout()
 			rf.mu.Unlock()
 		}
@@ -183,15 +182,12 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) setupargs(args *RPCAppendEntriesArgs, peer int) bool {
 	rf.mu.Lock()
-	if !rf.isLeader {
-		rf.mu.Unlock()
-		return false
-	}
+	defer rf.mu.Unlock()
+	if !rf.isLeader { return false }
 	args.LeaderId = rf.me
 	args.Term = rf.term
 	args.LeaderCommitIndex = rf.commitIndex
 	if rf.snapshotLastIndex > 0 && rf.nextIndex[peer] <= rf.snapshotLastIndex {
-		rf.mu.Unlock()
 		go rf.sendSnapshot(peer)
 		return false
 	} else {
@@ -211,10 +207,9 @@ func (rf *Raft) setupargs(args *RPCAppendEntriesArgs, peer int) bool {
 			if args.PrevLogIndex == rf.snapshotLastIndex {
 				args.PrevLogTerm = rf.snapshotLastTerm
 			} else {
-				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term 
+				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 			}
 		}
-		rf.mu.Unlock()
 		return true
 	}
 }
@@ -248,7 +243,7 @@ func (rf *Raft) sendSnapshot(peer int) {
 				}
 			}
 			rf.mu.Unlock()
-		}
+		} 
 	}
 }
 

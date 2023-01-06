@@ -7,8 +7,6 @@ import (
 	"6.824/labrpc"
 )
 
-type ServerState uint8
-
 type Raft struct {
 	mu        			sync.Mutex
 	applyCh				chan ApplyMsg
