@@ -6,12 +6,6 @@ import (
 )
 
 const (
-	LEADER ServerState = iota
-	FOLLOWER
-	CANDIDATE
-)
-
-const (
 	TICK_INTERVAL 		= 10 * time.Millisecond		// frequency followers check latest heartbeat
 	HEARTBEAT_INTERVAL 	= 110 * time.Millisecond	// frequency leader sends out heartbeats
 	ELECTION_LB_TIMEOUT	= 330 * time.Millisecond	// lower bound election timeout

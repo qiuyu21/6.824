@@ -31,15 +31,17 @@ import (
 func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return rf.term, rf.state == LEADER
+	return rf.term, rf.isLeader
 }
 
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool { return true }
+func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+	return true
+}
 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
     rf.mu.Lock()
     defer rf.mu.Unlock()
-    if rf.state != LEADER { return -1, -1, false }
+    if !rf.isLeader { return -1, -1, false }
 	rf.lastLogIndex++
 	rf.logs[rf.lastLogIndex] = &LogEntry{
 		Index: rf.lastLogIndex,
@@ -56,26 +58,27 @@ func (rf *Raft) Kill() {
 }
 
 func (rf *Raft) killed() bool {
-	z := atomic.LoadInt32(&rf.dead)
-	return z == 1
+	return atomic.LoadInt32(&rf.dead) == 1
 }
 
 func (rf *Raft) ticker() {
 	n := len(rf.peers)
 	for !rf.killed() {
 		rf.mu.Lock()
-		if rf.state == LEADER {
+		if rf.isLeader {
 			rf.mu.Unlock()
 			f := func(peer int) {
 				var args RPCAppendEntriesArgs
 				var repl RPCAppendEntriesReply
-				if !rf.setupargs(&args, peer) { return }
+				if !rf.setupargs(&args, peer) {
+					return
+				}
 				if rf.peers[peer].Call("Raft.RPCAppendEntries", &args, &repl) {
 					rf.mu.Lock()
-					if rf.state == LEADER {
+					if rf.isLeader {
 						if repl.Term > args.Term {
 							if repl.Term > rf.term {
-								rf.state = FOLLOWER
+								rf.isLeader = false
 								rf.term = repl.Term
 								rf.vote = -1
 								rf.persistState()
@@ -113,7 +116,7 @@ func (rf *Raft) ticker() {
 			}
 			for i := 0; i < n; i++ { if i != rf.me { go f(i) } }
 			time.Sleep(HEARTBEAT_INTERVAL)
-		} else if rf.state == FOLLOWER {
+		} else {
 			if rf.lastHB.Add(rf.timeout).After(time.Now()) {
 				rf.mu.Unlock()
 				time.Sleep(TICK_INTERVAL)
@@ -121,7 +124,6 @@ func (rf *Raft) ticker() {
 			}
 			rf.term++
 			rf.vote = rf.me
-			rf.state = CANDIDATE
 			rf.persistState()
 			newterm := rf.term
 			rf.mu.Unlock()
@@ -154,7 +156,6 @@ func (rf *Raft) ticker() {
 					granted++
 				} else if res.Term > newterm {
 					rf.mu.Lock()
-					rf.state = FOLLOWER
 					if res.Term > rf.term {
 						rf.term = res.Term
 						rf.vote = -1
@@ -166,15 +167,13 @@ func (rf *Raft) ticker() {
 			}
 			rf.mu.Lock()
 			if granted == m && rf.term == newterm {
-				rf.state = LEADER
+				rf.isLeader = true
 				rf.nextIndex = make([]int, n)
 				rf.matchIndex = make([]int, n)
 				for i := 0; i < n; i++ { 
 					rf.nextIndex[i]  = rf.lastLogIndex + 1
 					rf.matchIndex[i] = 0
 				}
-			} else {
-				rf.state = FOLLOWER
 			}
 			rf.timeout = RandElectionTimeout()
 			rf.mu.Unlock()
@@ -184,7 +183,7 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) setupargs(args *RPCAppendEntriesArgs, peer int) bool {
 	rf.mu.Lock()
-	if rf.state != LEADER { 
+	if !rf.isLeader {
 		rf.mu.Unlock()
 		return false
 	}
@@ -222,7 +221,7 @@ func (rf *Raft) setupargs(args *RPCAppendEntriesArgs, peer int) bool {
 
 func (rf *Raft) sendSnapshot(peer int) {
 	rf.mu.Lock()
-	if rf.state != LEADER {
+	if !rf.isLeader {
 		rf.mu.Unlock()
 	} else {
 		var args RPCInstallSnapshotArgs
@@ -236,10 +235,10 @@ func (rf *Raft) sendSnapshot(peer int) {
 		rf.mu.Unlock()
 		if rf.peers[peer].Call("Raft.RPCInstallSnapshot", &args, &repl) {
 			rf.mu.Lock()
-			if rf.state == LEADER {
+			if rf.isLeader {
 				if repl.Term > args.Term {
 					if repl.Term > rf.term {
-						rf.state = FOLLOWER
+						rf.isLeader = false
 						rf.term = repl.Term
 						rf.vote = -1
 						rf.persistState()
@@ -260,7 +259,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.state = FOLLOWER
+	rf.isLeader = false
 	rf.term = 0
 	rf.vote = -1
 	rf.logs = make(map[int]*LogEntry)
@@ -339,7 +338,7 @@ func (rf *Raft) RPCRequestVote(args *RPCRequestVoteArgs, reply *RPCRequestVoteRe
 		if args.Term > rf.term {
 			rf.term = args.Term
 			rf.vote = -1
-			rf.state = FOLLOWER
+			rf.isLeader = false
 			shouldPersist = true
 		}
 		if !cmp_uptodate() {
@@ -365,7 +364,7 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
 			rf.vote = args.LeaderId
 			shouldPersist = true
 		}
-		rf.state = FOLLOWER
+		rf.isLeader = false
 		rf.lastHB = time.Now()
 		reply.Term = args.Term
 		reply.Success = true
@@ -441,7 +440,7 @@ func (rf *Raft) RPCInstallSnapshot(args *RPCInstallSnapshotArgs, reply *RPCInsta
 			rf.term = args.Term
 			rf.vote = args.LeaderId
 		}
-		rf.state = FOLLOWER
+		rf.isLeader = false
 		rf.lastHB = time.Now()
 		reply.Term = args.Term
 		rf.snapshot = args.Data

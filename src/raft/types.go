@@ -16,7 +16,7 @@ type Raft struct {
 	persister 			*Persister          // Object to hold this peer's persisted state
 	me        			int                 // this peer's index into peers[]
 	dead      			int32               // set by Kill()
-	state 				ServerState			// leader?follower?candidate?
+	isLeader 			bool
 	term 				int 				// current term
 	vote 				int 				// the peer voted for in this term
 	lastHB				time.Time			// latest heartbeat
