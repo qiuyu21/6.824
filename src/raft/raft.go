@@ -46,7 +46,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term: rf.term,
 		Command: command,
 	}
-	rf.persist()
+	rf.persistState()
 	rf.matchIndex[rf.me] = rf.lastLogIndex
 	return rf.lastLogIndex, rf.term, true
 }
@@ -78,7 +78,7 @@ func (rf *Raft) ticker() {
 								rf.state = FOLLOWER
 								rf.term = repl.Term
 								rf.vote = -1
-								rf.persist()
+								rf.persistState()
 							}
 						} else if !repl.Success {
 							rf.nextIndex[peer] = repl.Index
@@ -122,7 +122,7 @@ func (rf *Raft) ticker() {
 			rf.term++
 			rf.vote = rf.me
 			rf.state = CANDIDATE
-			rf.persist()
+			rf.persistState()
 			newterm := rf.term
 			rf.mu.Unlock()
 			c := make(chan RPCRequestVoteReply, n)
@@ -158,7 +158,7 @@ func (rf *Raft) ticker() {
 					if res.Term > rf.term {
 						rf.term = res.Term
 						rf.vote = -1
-						rf.persist()
+						rf.persistState()
 					}
 					rf.mu.Unlock()
 					break
@@ -242,7 +242,7 @@ func (rf *Raft) sendSnapshot(peer int) {
 						rf.state = FOLLOWER
 						rf.term = repl.Term
 						rf.vote = -1
-						rf.persist()
+						rf.persistState()
 					}
 				} else {
 					rf.nextIndex[peer] = args.LastIncludedIndex + 1
@@ -263,20 +263,23 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER
 	rf.term = 0
 	rf.vote = -1
-	rf.lastHB = time.Now()
-	rf.timeout = RandElectionTimeout()
 	rf.logs = make(map[int]*LogEntry)
 	rf.commitIndex = 0
 	rf.lastLogIndex = 0
 	rf.readPersist(rf.persister.ReadRaftState())
 	rf.snapshot = rf.persister.ReadSnapshot()
-	time.Sleep(rf.timeout)
+	rf.lastHB = time.Now()
+	rf.timeout = RandElectionTimeout()
 	go rf.ticker()
 	return rf
 }
 
-func (rf *Raft) persist() {
+func (rf *Raft) persistState() {
 	rf.persister.SaveRaftState(rf.serializeState())
+}
+
+func (rf *Raft) persistStateAndSnapshot() {
+	rf.persister.SaveStateAndSnapshot(rf.serializeState(), rf.snapshot)
 }
 
 func (rf *Raft) readPersist(data []byte) {
@@ -291,11 +294,7 @@ func (rf *Raft) readPersist(data []byte) {
 			log.Fatalln("Decode has failed")
 		}
 	if len(rf.logs) > 0 {
-		for index := range rf.logs { 
-			if index > rf.lastLogIndex { 
-				rf.lastLogIndex = index
-			} 
-		}
+		for index := range rf.logs { if index > rf.lastLogIndex { rf.lastLogIndex = index } }
 	} else {
 		rf.lastLogIndex = rf.snapshotLastIndex
 	}
@@ -316,9 +315,7 @@ func (rf *Raft) serializeState() []byte {
 func (rf *Raft) RPCRequestVote(args *RPCRequestVoteArgs, reply *RPCRequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	shouldPersist := false
-	defer func(){ if shouldPersist {rf.persist()} }()
-	cmp_uptodate := func() bool { // Check if candidate is more up-to-date then me
+	cmp_uptodate := func() bool {
 		if rf.lastLogIndex > 0 {
 			if len(rf.logs) == 0 {
 				if args.LastLogTerm < rf.snapshotLastTerm { 
@@ -338,6 +335,7 @@ func (rf *Raft) RPCRequestVote(args *RPCRequestVoteArgs, reply *RPCRequestVoteRe
 		reply.Term = rf.term
 		reply.VoteGranted = false
 	} else {
+		shouldPersist := false
 		if args.Term > rf.term {
 			rf.term = args.Term
 			rf.vote = -1
@@ -351,6 +349,7 @@ func (rf *Raft) RPCRequestVote(args *RPCRequestVoteArgs, reply *RPCRequestVoteRe
 			reply.VoteGranted = true
 			shouldPersist = true
 		}
+		if shouldPersist { rf.persistState() }
 	}
 }
 
@@ -373,7 +372,7 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
 		if args.PrevLogIndex > rf.lastLogIndex {
 			reply.Index = rf.lastLogIndex + 1
 			reply.Success = false
-			if shouldPersist { rf.persist() }
+			if shouldPersist { rf.persistState() }
 			rf.mu.Unlock()
 			return
 		} else if args.PrevLogIndex > 0 {
@@ -382,9 +381,9 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
 			} else if args.PrevLogIndex > rf.snapshotLastIndex {
 				if t := rf.logs[args.PrevLogIndex].Term; t != args.PrevLogTerm {
 					reply.Index = args.PrevLogIndex
-					for reply.Index > 1 && rf.logs[reply.Index - 1].Term == t { reply.Index-- }
+					for reply.Index > 1 && reply.Index-1 > rf.snapshotLastIndex && rf.logs[reply.Index-1].Term == t { reply.Index-- }
 					reply.Success = false
-					if shouldPersist { rf.persist() }
+					if shouldPersist { rf.persistState() }
 					rf.mu.Unlock()
 					return
 				}
@@ -409,7 +408,7 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
 				break
 			}
 		}
-		if shouldPersist { rf.persist() }
+		if shouldPersist { rf.persistState() }
 		if args.LeaderCommitIndex > rf.commitIndex {
 			i := min(args.LeaderCommitIndex, rf.lastLogIndex)
 			j := rf.commitIndex + 1
@@ -458,7 +457,7 @@ func (rf *Raft) RPCInstallSnapshot(args *RPCInstallSnapshotArgs, reply *RPCInsta
 			rf.logs = make(map[int]*LogEntry)
 		}
 		if rf.snapshotLastIndex > rf.commitIndex { rf.commitIndex = rf.snapshotLastIndex }
-		rf.persister.SaveStateAndSnapshot(rf.serializeState(), rf.snapshot)
+		rf.persistStateAndSnapshot()
 		rf.applyCh <- ApplyMsg{
 			SnapshotValid: true,
 			Snapshot: rf.snapshot,
@@ -479,5 +478,5 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		if _, ok := rf.logs[i]; !ok { break }
 		delete(rf.logs, i)
 	}
-	rf.persister.SaveStateAndSnapshot(rf.serializeState(), rf.snapshot)
+	rf.persistStateAndSnapshot()
 }
