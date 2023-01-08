@@ -17,8 +17,12 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.term, rf.isLeader
 }
 
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-	return true
+func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool { return true }
+
+func (rf *Raft) killed() bool { return atomic.LoadInt32(&rf.dead) == 1 }
+
+func (rf *Raft) Kill() {
+	atomic.StoreInt32(&rf.dead, 1)
 }
 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -33,15 +37,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.persistState()
 	rf.matchIndex[rf.me] = rf.lastLogIndex
+	
 	return rf.lastLogIndex, rf.term, true
-}
-
-func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
-}
-
-func (rf *Raft) killed() bool {
-	return atomic.LoadInt32(&rf.dead) == 1
 }
 
 func (rf *Raft) ticker() {
@@ -68,8 +65,10 @@ func (rf *Raft) ticker() {
 							rf.nextIndex[peer] = repl.Index
 						} else if m := len(args.Entries); m > 0 {
 							i := args.Entries[m-1].Index
-							rf.nextIndex[peer] = i + 1
-							rf.matchIndex[peer] = i
+							if i + 1 > rf.nextIndex[peer] { 
+								rf.nextIndex[peer] = i + 1
+								rf.matchIndex[peer] = i
+							}
 							sorted := make([]int, len(rf.matchIndex))
 							copy(sorted, rf.matchIndex)
 							sort.Ints(sorted)
@@ -169,7 +168,7 @@ func (rf *Raft) setupargs(args *RPCAppendEntriesArgs, peer int) bool {
 	if !rf.isLeader { return false }
 	args.LeaderId = rf.me
 	args.Term = rf.term
-	args.LeaderCommitIndex = rf.commitIndex
+	args.LeaderCommitIndex = min(rf.commitIndex, rf.matchIndex[peer]);
 	if rf.snapshotLastIndex > 0 && rf.nextIndex[peer] <= rf.snapshotLastIndex {
 		go rf.sendSnapshot(peer)
 		return false
@@ -221,8 +220,9 @@ func (rf *Raft) sendSnapshot(peer int) {
 						rf.vote = -1
 						rf.persistState()
 					}
-				} else {
+				} else if args.LastIncludedIndex + 1 > rf.nextIndex[peer] { 
 					rf.nextIndex[peer] = args.LastIncludedIndex + 1
+					rf.matchIndex[peer] = args.LastIncludedIndex
 				}
 			}
 			rf.mu.Unlock()
