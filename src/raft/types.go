@@ -22,6 +22,7 @@ type Raft struct {
 
 	logs 				map[int]*LogEntry	
 	commitIndex 		int
+	nextCommitIndex		int
 	lastLogIndex		int
 
 	nextIndex 			[]int				// index of the next log entry to send
@@ -30,6 +31,10 @@ type Raft struct {
 	snapshot 			[]byte
 	snapshotLastIndex 	int
 	snapshotLastTerm 	int
+
+	notifyCh 			[]chan struct{}
+	closeCh				chan struct{}
+	commitCh			chan struct{}
 }
 
 type ApplyMsg struct {
