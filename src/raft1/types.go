@@ -2,6 +2,7 @@ package raft1
 
 import (
 	"sync"
+	"time"
 
 	"6.824/labrpc"
 )
@@ -18,21 +19,56 @@ type ApplyMsg struct {
 }
 
 type Raft struct {
-	mu        sync.Mutex
-	peers     []*labrpc.ClientEnd
-	persister *Persister
-	me        int
-	dead      int32
+	mu        			sync.Mutex
+	peers     			[]*labrpc.ClientEnd
+	persister 			*Persister
+	me        			int
+	dead      			int32
+
+	isLeader 			bool
+	term 				int
+	vote	 			int
+	lastHB				time.Time
+	timeout 			time.Duration
+
+	logs 				[]LogEntry
+	firstLogIndex		int
+	lastLogIndex		int
+	commitIndex 		int
+	nextCommitIndex 	int
+
+	nextIndex 			[]int
+	matchIndex 			[]int
+
+	snapshot 			[]byte
+	snapshotLastIndex	int
+	snapshotLastTerm 	int
 }
 
-type RequestVoteArgs struct {}
+type LogEntry struct {
+	Index, Term int
+	Command interface{}
+}
 
-type RequestVoteReply struct {}
+type RPCRequestVoteArgs struct {
+	CandidateId, Term, LastLogTerm, LastLogIndex int
+}
 
-type AppendEntriesArgs struct {}
+type RPCRequestVoteReply struct {
+	Term int
+	VoteGranted bool
+}
 
-type AppendEntriesReply struct {}
+type RPCAppendEntriesArgs struct {
+	Term, LeaderId, PrevLogTerm, PrevLogIndex, LeaderCommitIndex int
+	Entries []LogEntry
+}
 
-type InstallSnapshotArgs struct {}
+type RPCAppendEntriesReply struct {
+	Term, Index int
+	Success bool
+}
 
-type InstallSnapshotReply struct {}
+type RPCInstallSnapshotArgs struct {}
+
+type RPCInstallSnapshotReply struct {}
