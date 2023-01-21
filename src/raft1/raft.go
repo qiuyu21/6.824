@@ -435,23 +435,23 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
         reply.Success = true
         if args.PrevLogIndex > rf.lastLogIndex {
             reply.Index = rf.lastLogIndex + 1
-			reply.Success = false
-			if shouldPersist { rf.persistState() }
-			rf.mu.Unlock()
-			return
+            reply.Success = false
+            if shouldPersist { rf.persistState() }
+            rf.mu.Unlock()
+            return
         } else if args.PrevLogIndex > 0 {
             if args.PrevLogIndex == rf.snapshotLastIndex {
-				if args.PrevLogTerm != rf.snapshotLastTerm { log.Fatalln("2:This should not happen!") }
-			} else if args.PrevLogIndex > rf.snapshotLastIndex {
-				if t := rf.logs[args.PrevLogIndex].Term; t != args.PrevLogTerm {
-					reply.Index = args.PrevLogIndex
-					for reply.Index > 1 && reply.Index-1 > rf.snapshotLastIndex && rf.logs[reply.Index-1].Term == t { reply.Index-- }
-					reply.Success = false
-					if shouldPersist { rf.persistState() }
-					rf.mu.Unlock()
-					return
-				}
-			}
+                if args.PrevLogTerm != rf.snapshotLastTerm { log.Fatalln("2:This should not happen!") }
+            } else if args.PrevLogIndex > rf.snapshotLastIndex {
+                if t := rf.logs[args.PrevLogIndex].Term; t != args.PrevLogTerm {
+                    reply.Index = args.PrevLogIndex
+                    for reply.Index > 1 && reply.Index-1 > rf.snapshotLastIndex && rf.logs[reply.Index-1].Term == t { reply.Index-- }
+                    reply.Success = false
+                    if shouldPersist { rf.persistState() }
+                    rf.mu.Unlock()
+                    return
+                }
+            }
         }
         for i, l_log := range args.Entries {
             if l_log.Index <= rf.snapshotLastIndex {
