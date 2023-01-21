@@ -57,61 +57,7 @@ func (rf *Raft) ticker() {
 				time.Sleep(TICK_INTERVAL)
 				continue
 			}
-			rf.term++
-			rf.vote = rf.me
-			rf.persistState()
-			newterm := rf.term
-			rf.mu.Unlock()
-			mu := sync.Mutex{}
-			cd := sync.NewCond(&mu)
-			re := []RPCRequestVoteReply{}
-			re = append(re, RPCRequestVoteReply{VoteGranted: true})
-			requestVote := func(peer int) {
-				var args RPCRequestVoteArgs
-				var repl RPCRequestVoteReply
-				rf.mu.Lock()
-				rf.setupRequestVoteArgs(&args)
-				rf.mu.Unlock()
-				rf.peers[peer].Call("Raft.RPCRequestVote", &args, &repl)
-				mu.Lock()
-				re = append(re, repl)
-				cd.Signal()
-				mu.Unlock()
-			}
-			for i := 0; i < n; i++ { if i != rf.me { go requestVote(i) } }
-			granted, majority := 0, n/2 + 1
-			for i := 0; granted < majority && granted + n - i >= majority; i++ {
-				mu.Lock()
-				for len(re) == 0 { cd.Wait() }
-				if re[0].VoteGranted {
-					granted++
-				} else if re[0].Term > newterm {
-					rf.mu.Lock()
-					if re[0].Term > rf.term {
-						rf.term = re[0].Term
-						rf.vote = -1
-						rf.persistState()
-					}
-					rf.mu.Unlock()
-					mu.Unlock()
-					break
-				}
-				re = re[1:]
-				mu.Unlock()
-			}
-			rf.mu.Lock()
-			if granted == majority {
-				rf.isLeader = true
-				rf.nextIndex = make([]int, n)
-				rf.matchIndex = make([]int, n)
-				for i := 0; i < n; i++ {
-					rf.nextIndex[i]  = rf.lastLogIndex + 1
-					rf.matchIndex[i] = 0
-				}
-			}
-			rf.lastHB = time.Now()
-			rf.timeout = RandElectionTimeout()
-			rf.mu.Unlock()
+			rf.election()
 		}
 	}
 }
@@ -142,6 +88,65 @@ func (rf *Raft) heartbeat(peer int) {
 		}
 		rf.mu.Unlock()
 	}
+}
+
+func (rf *Raft) election() {
+	n := len(rf.peers)
+	rf.term++
+	rf.vote = rf.me
+	rf.persistState()
+	newterm := rf.term
+	rf.mu.Unlock()
+	mu := sync.Mutex{}
+	cd := sync.NewCond(&mu)
+	re := []RPCRequestVoteReply{}
+	re = append(re, RPCRequestVoteReply{VoteGranted: true})
+	requestVote := func(peer int) {
+		var args RPCRequestVoteArgs
+		var repl RPCRequestVoteReply
+		rf.mu.Lock()
+		rf.setupRequestVoteArgs(&args)
+		rf.mu.Unlock()
+		rf.peers[peer].Call("Raft.RPCRequestVote", &args, &repl)
+		mu.Lock()
+		re = append(re, repl)
+		cd.Signal()
+		mu.Unlock()
+	}
+	for i := 0; i < n; i++ { if i != rf.me { go requestVote(i) } }
+	granted, majority := 0, n/2 + 1
+	for i := 0; granted < majority && granted + n - i >= majority; i++ {
+		mu.Lock()
+		for len(re) == 0 { cd.Wait() }
+		if re[0].VoteGranted {
+			granted++
+		} else if re[0].Term > newterm {
+			rf.mu.Lock()
+			if re[0].Term > rf.term {
+				rf.term = re[0].Term
+				rf.vote = -1
+				rf.persistState()
+			}
+			rf.mu.Unlock()
+			mu.Unlock()
+			break
+		}
+		re = re[1:]
+		mu.Unlock()
+	}
+	rf.mu.Lock()
+	if granted == majority {
+		rf.isLeader = true
+		rf.nextIndex = make([]int, n)
+		rf.matchIndex = make([]int, n)
+		for i := 0; i < n; i++ {
+			rf.nextIndex[i]  = rf.lastLogIndex + 1
+			rf.matchIndex[i] = 0
+		}
+	}
+	rf.lastHB = time.Now()
+	rf.timeout = RandElectionTimeout()
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) setupRequestVoteArgs(args *RPCRequestVoteArgs) {
