@@ -20,6 +20,7 @@ type ApplyMsg struct {
 
 type Raft struct {
 	mu        			sync.Mutex
+	applyCh 			chan ApplyMsg
 	peers     			[]*labrpc.ClientEnd
 	persister 			*Persister
 	me        			int
@@ -43,6 +44,9 @@ type Raft struct {
 	snapshot 			[]byte
 	snapshotLastIndex	int
 	snapshotLastTerm 	int
+
+	notifyCond			*sync.Cond
+	commitCond 			*sync.Cond
 }
 
 type LogEntry struct {

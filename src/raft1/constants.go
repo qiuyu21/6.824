@@ -10,7 +10,7 @@ const (
 	HEARTBEAT_INTERVAL 	= 100 * time.Millisecond	// frequency leader sends out heartbeats
 	ELECTION_LB_TIMEOUT	= 400 * time.Millisecond	// lower bound election timeout
 	ELECTION_UB_TIMEOUT	= 800 * time.Millisecond	// upper bound election timeout
-	
+
 	DEFAULT_LOG_SIZE 	= 1024
 )
 
