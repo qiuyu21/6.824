@@ -1,14 +1,11 @@
 package kvraft
 
-import "6.824/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
 
-
-type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
-}
+	"6.824/labrpc"
+)
 
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
@@ -20,45 +17,45 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
 	return ck
-}
-
-//
-// fetch the current value for a key.
-// returns "" if the key does not exist.
-// keeps trying forever in the face of all other errors.
-//
-// you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
-//
-// the types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
-//
-func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
-}
-
-//
-// shared by Put and Append.
-//
-// you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
-//
-// the types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
-//
-func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
 }
 
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, "Put")
 }
+
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+func (ck *Clerk) Get(key string) string {
+	for {
+		for _, server := range ck.servers {
+			var args RPCGetArgs
+			var repl RPCGetReply
+			args.Key = key
+			if server.Call("KVServer.RPCGet", &args, &repl) {
+				if repl.Err == 0 {
+					return repl.Value
+				}
+			}
+		}
+	}
+}
+
+func (ck *Clerk) PutAppend(key string, value string, op string) {
+	for {
+		for _, server := range ck.servers {
+			var args RPCPutAppendArgs
+			var repl RPCPutAppendReply
+			args.Key = key
+			args.Value = value
+			args.Op = op
+			if server.Call("KVServer.RPCPutAppend", &args, &repl) {
+				if repl.Err == 0 {
+					return
+				}
+			}
+		}
+	}
 }

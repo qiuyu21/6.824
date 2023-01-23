@@ -1,50 +1,13 @@
 package kvraft
 
 import (
+	"sync"
+	"sync/atomic"
+
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
-	"log"
-	"sync"
-	"sync/atomic"
 )
-
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
-
-
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-}
-
-type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
-
-	maxraftstate int // snapshot if log grows this big
-
-	// Your definitions here.
-}
-
-
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
-}
-
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
-}
 
 //
 // the tester calls Kill() when a KVServer instance won't
@@ -59,13 +22,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
-	// Your code here, if desired.
+	close(kv.closeCh)
 }
 
-func (kv *KVServer) killed() bool {
-	z := atomic.LoadInt32(&kv.dead)
-	return z == 1
-}
+func (kv *KVServer) killed() bool { return atomic.LoadInt32(&kv.dead) == 1 }
 
 //
 // servers[] contains the ports of the set of
@@ -82,20 +42,73 @@ func (kv *KVServer) killed() bool {
 // for any long-running work.
 //
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
-	// call labgob.Register on structures you want
-	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
-
-	kv := new(KVServer)
+	kv := &KVServer{}
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-
-	// You may need initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCond = sync.NewCond(&kv.mu)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-	// You may need initialization code here.
-
+	kv.store = NewHashKeyValueStore(nil)
+	kv.closeCh = make(chan struct{})
+	kv.committed = make(map[int]int)
+	go kv.apply()
 	return kv
+}
+
+func (kv *KVServer) apply() {
+	for !kv.killed() {
+		select {
+		case <- kv.closeCh:
+			return
+		case applymsg := <- kv.applyCh:
+			if applymsg.CommandValid {
+				kv.mu.Lock()
+				index, term := applymsg.CommandIndex, applymsg.CommandTerm
+				cmd := applymsg.Command.(Op)
+				kv.store.PutAppend(cmd.Op=="Put", cmd.Key, cmd.Val)
+				kv.committed[index] = term
+				kv.applyCond.Broadcast()
+				kv.mu.Unlock()
+			} else {
+				panic("NOT IMPLEMENTED")
+			}
+		}
+	}
+}
+
+func (kv *KVServer) RPCGet(args *RPCGetArgs, reply *RPCGetReply) {
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		reply.Err = 1
+	} else {
+		reply.Value = kv.store.Get(args.Key)
+	}
+}
+
+func (kv *KVServer) RPCPutAppend(args *RPCPutAppendArgs, reply *RPCPutAppendReply) {
+	for !kv.killed() {
+		op := Op{
+			Op: args.Op,
+			Key: args.Key,
+			Val: args.Value,
+		}
+		index, term, isLeader := kv.rf.Start(op)
+		if !isLeader {
+			reply.Err = 1
+			return
+		}
+		kv.mu.Lock()
+		for !kv.killed() {
+			if t, ok := kv.committed[index]; !ok {
+				kv.applyCond.Wait()
+			} else if term != t {
+				break
+			} else {
+				kv.mu.Unlock()
+				reply.Err = 0
+				return
+			}
+		}
+		kv.mu.Unlock()
+	}
 }
