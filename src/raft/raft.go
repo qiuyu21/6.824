@@ -530,6 +530,7 @@ func (rf *Raft) commit() {
 				rf.applyCh <- ApplyMsg{
 					CommandValid: true,
 					CommandIndex: i,
+					CommandTerm: log.Term,
 					Command: log.Command,
 				}
 				rf.mu.Lock()
