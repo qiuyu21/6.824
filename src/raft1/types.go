@@ -32,25 +32,22 @@ type Raft struct {
     lastHB				time.Time
     timeout 			time.Duration
 
-    logs 				[]LogEntry
-    firstLogIndex		int
-    lastLogIndex		int
-    commitIndex 		int
-    nextCommitIndex 	int
-
-    nextIndex 			[]int
-    matchIndex 			[]int
-
     snapshot 			[]byte
     snapshotLastIndex	int
     snapshotLastTerm 	int
 
     notifyCond			*sync.Cond
     commitCond 			*sync.Cond
+
+    logManager          LogManager
+    nextIndex 			[]int
+    matchIndex 			[]int
+    commitIndex 		int
+    nextCommitIndex 	int
 }
 
 type LogEntry struct {
-    Index, Term int
+    Term int
     Command interface{}
 }
 
@@ -65,7 +62,7 @@ type RPCRequestVoteReply struct {
 
 type RPCAppendEntriesArgs struct {
     Term, LeaderId, PrevLogTerm, PrevLogIndex, LeaderCommitIndex int
-    Entries []LogEntry
+    Entries []*LogEntry
 }
 
 type RPCAppendEntriesReply struct {

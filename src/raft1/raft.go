@@ -21,15 +21,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.isLeader 		= false
     rf.term 			= 0
     rf.vote 			= -1
-    rf.logs 			= make([]LogEntry, DEFAULT_LOG_SIZE)
-    rf.firstLogIndex 	= 0
-    rf.lastLogIndex 	= 0
     rf.commitIndex 		= 0
     rf.nextCommitIndex 	= 0
     rf.lastHB 			= time.Now()
     rf.timeout 			= RandElectionTimeout()
     rf.commitCond       = sync.NewCond(&rf.mu)
     rf.notifyCond       = sync.NewCond(&rf.mu)
+    rf.logManager       = NewHashLogManager()
     rf.readPersistState(persister.ReadRaftState())
     go rf.commit()
     go rf.ticker()
@@ -45,26 +43,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
     rf.mu.Lock()
     defer rf.mu.Unlock()
     if !rf.isLeader { return -1, -1, false }
-    // 
-    rf.lastLogIndex++
-    if rf.lastLogIndex == len(rf.logs) {
-        newlogs := make([]LogEntry, len(rf.logs) * 2)
-        copy(newlogs, rf.logs)
-        rf.logs = newlogs
-    }
-    rf.logs[rf.lastLogIndex] = LogEntry{
-        Index: rf.lastLogIndex,
-        Term: rf.term,
-        Command: command,
-    }
+    rf.matchIndex[rf.me] = rf.logManager.AppendLog(&LogEntry{Term: rf.term, Command: command})
     rf.persistState()
-    rf.matchIndex[rf.me] = rf.lastLogIndex
-    for i := 0; i < len(rf.peers); i++ { 
-        if i != rf.me { 
-            rf.notifyCond.Broadcast()
-        }
-    }
-    return rf.lastLogIndex, rf.term, rf.isLeader
+    rf.notifyCond.Broadcast()
+    return rf.matchIndex[rf.me], rf.term, rf.isLeader
 }
 
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool { return true }
@@ -88,20 +70,16 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) persistState() {
-
 }
 
 func (rf *Raft) persistStateAndSnapshot() {
-
 }
 
 func (rf *Raft) readPersistState(data []byte) {
     if data == nil || len(data) < 1 { return }
 }
 
-func (rf *Raft) serializeState() []byte { 
-    return nil
-}
+func (rf *Raft) serializeState() []byte { return nil }
 
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
@@ -210,7 +188,7 @@ func (rf *Raft) election() {
         rf.nextIndex = make([]int, n)
         rf.matchIndex = make([]int, n)
         for i := 0; i < n; i++ {
-            rf.nextIndex[i]  = rf.lastLogIndex + 1
+            rf.nextIndex[i]  = rf.logManager.GetLastLogIndex() + 1
             rf.matchIndex[i] = 0
         }
     }
@@ -226,7 +204,7 @@ func (rf *Raft) replicate(peer int) {
             rf.mu.Unlock()
             return
         }
-        for !rf.isLeader || rf.nextIndex[peer] > rf.lastLogIndex {
+        for !rf.isLeader || rf.nextIndex[peer] > rf.logManager.GetLastLogIndex() {
             rf.notifyCond.Wait()
             if rf.dead == 1 {
                 rf.mu.Unlock()
@@ -285,7 +263,7 @@ func (rf *Raft) _replicate(peer int) {
                         continue
                     } else {
                         m := len(args.Entries)
-                        i := args.Entries[m-1].Index
+                        i := args.PrevLogIndex + m
                         if i + 1 > rf.nextIndex[peer] {
                             rf.nextIndex[peer] = i + 1
                             rf.matchIndex[peer] = i
@@ -293,7 +271,8 @@ func (rf *Raft) _replicate(peer int) {
                             copy(sorted, rf.matchIndex)
                             sort.Ints(sorted)
                             j := sorted[n-n/2-1]
-                            if j > rf.snapshotLastIndex && j > rf.commitIndex && rf.logs[j].Term == rf.term {
+                            _, log := rf.logManager.GetLog(j)
+                            if j > rf.snapshotLastIndex && j > rf.commitIndex && log.Term == rf.term {
                                 rf.nextCommitIndex = j
                                 rf.commitCond.Signal()
                             }
@@ -329,7 +308,7 @@ func (rf *Raft) commit() {
                 rf.mu.Unlock()
                 continue
             }
-            log := rf.logs[i]
+            _, log := rf.logManager.GetLog(i)
             rf.mu.Unlock()
             rf.applyCh <- ApplyMsg{
                 CommandValid: true,
@@ -346,12 +325,13 @@ func (rf *Raft) commit() {
 func (rf *Raft) setupRequestVoteArgs(args *RPCRequestVoteArgs) {
     args.CandidateId = rf.me
     args.Term = rf.term
-    args.LastLogIndex = rf.lastLogIndex
+    args.LastLogIndex = rf.logManager.GetLastLogIndex()
     if args.LastLogIndex > 0 {
         if args.LastLogIndex == rf.snapshotLastIndex {
             args.LastLogTerm = rf.snapshotLastTerm
         } else {
-            args.LastLogTerm = rf.logs[args.LastLogIndex].Term
+            _, log := rf.logManager.GetLog(args.LastLogIndex)
+            args.LastLogTerm = log.Term
         }
     }
 }
@@ -360,18 +340,18 @@ func (rf *Raft) setupAppendEntriesArgs(args *RPCAppendEntriesArgs, peer int) {
     args.LeaderId = rf.me
     args.Term = rf.term
     args.LeaderCommitIndex = min(rf.matchIndex[peer], rf.commitIndex)
-    if rf.lastLogIndex >= rf.nextIndex[peer] {
-        args.Entries = make([]LogEntry, rf.lastLogIndex - rf.nextIndex[peer] + 1)
-        copy(args.Entries, rf.logs[rf.nextIndex[peer]:])
+    if lastIndex := rf.logManager.GetLastLogIndex(); lastIndex >= rf.nextIndex[peer] {
+        rf.logManager.GetLogs(&args.Entries, rf.nextIndex[peer], lastIndex)
         args.PrevLogIndex = rf.nextIndex[peer] - 1
     } else {
-        args.PrevLogIndex = rf.lastLogIndex
+        args.PrevLogIndex = lastIndex
     }
     if args.PrevLogIndex > 0 {
         if args.PrevLogIndex == rf.snapshotLastIndex {
             args.PrevLogTerm = rf.snapshotLastTerm
         } else {
-            args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+            _, lastLog := rf.logManager.GetLog(args.PrevLogIndex)
+            args.PrevLogTerm = lastLog.Term
         }
     }
 }
@@ -380,17 +360,20 @@ func (rf *Raft) RPCRequestVote(args *RPCRequestVoteArgs, reply *RPCRequestVoteRe
     rf.mu.Lock()
     defer rf.mu.Unlock()
     cmp_uptodate := func() bool {
-        if rf.lastLogIndex > 0 {
-            if len(rf.logs) == 0 {
+        if lastIndex := rf.logManager.GetLastLogIndex(); lastIndex > 0 {
+            if rf.logManager.GetSize() == 0 {
                 if args.LastLogTerm < rf.snapshotLastTerm { 
                     return false
-                } else if args.LastLogTerm == rf.snapshotLastTerm && args.LastLogIndex < rf.lastLogIndex {
+                } else if args.LastLogTerm == rf.snapshotLastTerm && args.LastLogIndex < lastIndex {
                     return false
                 }
-            } else if args.LastLogTerm < rf.logs[rf.lastLogIndex].Term {
-                return false
-            } else if args.LastLogTerm == rf.logs[rf.lastLogIndex].Term && args.LastLogIndex < rf.lastLogIndex {
-                return false
+            } else {
+                _, log := rf.logManager.GetLog(lastIndex)
+                if args.LastLogTerm < log.Term {
+                    return false
+                } else if args.LastLogTerm == log.Term && args.LastLogIndex < lastIndex {
+                    return false
+                }
             }
         }
         return true
@@ -433,8 +416,8 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
         rf.lastHB = time.Now()
         reply.Term = args.Term
         reply.Success = true
-        if args.PrevLogIndex > rf.lastLogIndex {
-            reply.Index = rf.lastLogIndex + 1
+        if lastIndex := rf.logManager.GetLastLogIndex(); args.PrevLogIndex > lastIndex {
+            reply.Index = lastIndex + 1
             reply.Success = false
             if shouldPersist { rf.persistState() }
             rf.mu.Unlock()
@@ -443,9 +426,14 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
             if args.PrevLogIndex == rf.snapshotLastIndex {
                 if args.PrevLogTerm != rf.snapshotLastTerm { log.Fatalln("2:This should not happen!") }
             } else if args.PrevLogIndex > rf.snapshotLastIndex {
-                if t := rf.logs[args.PrevLogIndex].Term; t != args.PrevLogTerm {
+                _, log := rf.logManager.GetLog(args.PrevLogIndex)
+                if t := log.Term; t != args.PrevLogTerm {
                     reply.Index = args.PrevLogIndex
-                    for reply.Index > 1 && reply.Index-1 > rf.snapshotLastIndex && rf.logs[reply.Index-1].Term == t { reply.Index-- }
+                    for reply.Index > 1 && reply.Index-1 > rf.snapshotLastIndex {
+                        _, log1 := rf.logManager.GetLog(reply.Index - 1)
+                        if log1.Term != t { break }
+                        reply.Index--
+                    }
                     reply.Success = false
                     if shouldPersist { rf.persistState() }
                     rf.mu.Unlock()
@@ -454,32 +442,26 @@ func (rf *Raft) RPCAppendEntries(args *RPCAppendEntriesArgs, reply *RPCAppendEnt
             }
         }
         for i, l_log := range args.Entries {
-            if l_log.Index <= rf.snapshotLastIndex {
+            index := args.PrevLogIndex + i + 1  // log index
+            if index <= rf.snapshotLastIndex {
                 continue
-            } else if l_log.Index <= rf.lastLogIndex {
-                if rf.logs[l_log.Index].Term == l_log.Term { continue }
-                rf.lastLogIndex = l_log.Index - 1
+            } else if index <= rf.logManager.GetLastLogIndex() {
+                _, log := rf.logManager.GetLog(index)
+                if log.Term == l_log.Term { continue }
+                rf.logManager.RemoveLogsFrom(index)
             }
             for j := i; j < len(args.Entries); j++ {
-                rf.lastLogIndex++
-                if rf.lastLogIndex != args.Entries[j].Index { log.Fatalln("3:This should not happen!") }
-                if rf.lastLogIndex == len(rf.logs) {
-                    newlogs := make([]LogEntry, len(rf.logs) * 2)
-                    copy(newlogs, rf.logs)
-                    rf.logs = newlogs
-                }
-                rf.logs[rf.lastLogIndex] = LogEntry{
-                    Index: args.Entries[j].Index,
+                rf.logManager.AppendLog(&LogEntry{
                     Term: args.Entries[j].Term,
                     Command: args.Entries[j].Command,
-                }
+                })
             }
             shouldPersist = true
             break
         }
         if shouldPersist { rf.persistState() }
         if args.LeaderCommitIndex > rf.commitIndex {
-            rf.nextCommitIndex = min(args.LeaderCommitIndex, rf.lastLogIndex)
+            rf.nextCommitIndex = min(args.LeaderCommitIndex, rf.logManager.GetLastLogIndex())
             rf.commitCond.Signal()
         }
         rf.mu.Unlock()
